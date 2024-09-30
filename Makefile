@@ -78,6 +78,41 @@ ENVTEST_K8S_VERSION = 1.31.0
 ENVTEST_PACKAGE_VERSION = v0.0.0-20240813183042-b901db121e1f
 CRD_REF_DOCS_VERSION = 0.1.0
 
+# Prometheus unit tes
+ALERT_UNIT_TEST_DIR ?= $(shell pwd)/tests/prometheus_unit_tests/
+PROMETHEUS_IMAGE ?= quay.io/prometheus/prometheus
+YQ_IMAGE ?= mikefarah/yq:4.34.1
+CONTAINER_RUNTIME ?= docker
+GENERATED_RULES_DIR ?= $(shell pwd)/generated_alert_rules
+PROMETHEUS_CONFIGS ?= $(shell pwd)config/monitoring/prometheus/apps/prometheus-configs.yaml
+
+# List of rules to extract
+ALERT_RULES := \
+    "rhods-dashboard-alerting.rules" \
+	"model-mesh-alerting.rules" \
+    trustyai-alerting.rules \
+    odh-model-controller-alerting.rules \
+    workbenches-alerting.rules \
+    data-science-pipelines-operator-alerting.rules \
+    kserve-alerting.rules \
+    kueue-alerting.rules \
+    ray-alerting.rules
+
+# Generate the list of individual rule files
+EXTRACTED_RULE_FILES := $(patsubst %.rules,$(GENERATED_RULES_DIR)/%.yaml,$(ALERT_RULES))
+
+# Ensures the generated rules directory exists
+$(GENERATED_RULES_DIR):
+	mkdir -p "$(GENERATED_RULES_DIR)"
+
+# Rules to extract individual alert rule files
+$(GENERATED_RULES_DIR)/%.yaml: $(PROMETHEUS_CONFIGS) | $(GENERATED_RULES_DIR)
+	@echo "Extracting $* from prometheus-configs.yaml"
+	$(CONTAINER_RUNTIME) run --rm -t \
+	   -v "$(PROMETHEUS_CONFIGS)":/data/prometheus-configs.yaml:Z \
+	   $(YQ_IMAGE) \
+	   eval '.data."$*"' /data/prometheus-configs.yaml > "$(GENERATED_RULES_DIR)/$*.yaml"
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
 GOBIN=$(shell go env GOPATH)/bin
@@ -374,6 +409,19 @@ CLEANFILES += cover.out
 .PHONY: e2e-test
 e2e-test: ## Run e2e tests for the controller
 	go test ./tests/e2e/ -run ^TestOdhOperator -v --operator-namespace=${OPERATOR_NAMESPACE} ${E2E_TEST_FLAGS}
+
+# Extract all alert rule files
+.PHONY: extract-alert-rules
+extract-alert-rules: $(EXTRACTED_RULE_FILES)
+
+# Run prometheus-alert-unit-tests
+.PHONY: test-alerts
+test-alerts: extract-alert-rules
+	$(CONTAINER_RUNTIME) run --rm -t \
+	    -v "$(ALERT_UNIT_TEST_DIR)":/prometheus/unit_tests:Z \
+	    -v "$(GENERATED_RULES_DIR)":/prometheus/alert_rules:Z \
+	    $(PROMETHEUS_IMAGE) \
+	    promtool test rules /prometheus/unit_tests
 
 clean: $(GOLANGCI_LINT)
 	$(GOLANGCI_LINT) cache clean
